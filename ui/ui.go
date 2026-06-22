@@ -245,10 +245,11 @@ func (m Model) viewNetwork() string {
 		b.WriteString(speedBar("▼ Download", s.DownloadSpeed, dlStyle))
 		b.WriteString("\n\n")
 
+		totalUp, totalDown, _ := m.store.QueryDailyTotals()
 		b.WriteString(sectionStyle.Render("──── Totals ────"))
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("%s  %s\n", uploadStyle.Render("▲"), formatBytes(s.TotalUpload)))
-		b.WriteString(fmt.Sprintf("%s  %s\n", dlStyle.Render("▼"), formatBytes(s.TotalDownload)))
+		b.WriteString(fmt.Sprintf("%s  %s\n", uploadStyle.Render("▲"), formatBytes(totalUp)))
+		b.WriteString(fmt.Sprintf("%s  %s\n", dlStyle.Render("▼"), formatBytes(totalDown)))
 		b.WriteString("\n")
 
 		b.WriteString(sectionStyle.Render("──── Session ────"))

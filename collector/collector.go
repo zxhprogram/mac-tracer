@@ -13,8 +13,6 @@ import (
 type Stats struct {
 	UploadSpeed     int64 // bytes/sec
 	DownloadSpeed   int64 // bytes/sec
-	TotalUpload     int64 // accumulated total bytes
-	TotalDownload   int64
 	SessionUpload   int64
 	SessionDownload int64
 	TodayUpload     int64
@@ -27,6 +25,7 @@ type Collector struct {
 	mu           sync.Mutex
 	stats        Stats
 	lastCounters map[string]storage.InterfaceCounter // per-interface last reading
+	currentDate  string                              // tracks day boundary for Today reset
 
 	currentMinute  string
 	minuteUpload   int64
@@ -44,14 +43,6 @@ func New(store *storage.Storage) *Collector {
 }
 
 func (c *Collector) Start() {
-	// Load persisted totals
-	totals, err := c.store.LoadTotals()
-	if err != nil {
-		log.Printf("load totals: %v", err)
-	}
-	c.stats.TotalUpload = totals.TotalUpload
-	c.stats.TotalDownload = totals.TotalDownload
-
 	// Load persisted interface counters (for delta computation across restarts)
 	savedCounters, err := c.store.LoadInterfaceCounters()
 	if err != nil {
@@ -60,16 +51,15 @@ func (c *Collector) Start() {
 	c.lastCounters = savedCounters
 
 	// Load today's stats
-	today := time.Now().Format("2006-01-02")
-	daily, err := c.store.LoadDailyStats(today)
+	c.currentDate = time.Now().Format("2006-01-02")
+	daily, err := c.store.LoadDailyStats(c.currentDate)
 	if err != nil {
 		log.Printf("load daily stats: %v", err)
 	}
 	c.stats.TodayUpload = daily.Upload
 	c.stats.TodayDownload = daily.Download
 
-	// First tick: read current counters without computing delta
-	// This establishes baseline for next tick's delta
+	// First tick: read current counters as baseline (no catchup)
 	c.firstTick()
 
 	go c.loop()
@@ -93,50 +83,22 @@ func (c *Collector) firstTick() {
 		return
 	}
 
-	var catchupUpload, catchupDownload int64
-
 	for _, ctr := range counters {
 		if isLoopback(ctr.Name) {
 			continue
 		}
-
-		curSent := int64(ctr.BytesSent)
-		curRecv := int64(ctr.BytesRecv)
-
-		last, exists := c.lastCounters[ctr.Name]
-		if !exists {
-			// New interface (first launch): count all current bytes as historical baseline
-			catchupUpload += curSent
-			catchupDownload += curRecv
-		} else if curSent > last.BytesSent || curRecv > last.BytesRecv {
-			// Traffic happened while app was closed: count the gap
-			if curSent > last.BytesSent {
-				catchupUpload += curSent - last.BytesSent
-			}
-			if curRecv > last.BytesRecv {
-				catchupDownload += curRecv - last.BytesRecv
-			}
-		}
-		// If current < saved (counter reset while app was closed), no catchup needed
-
+		// Just set current counters as baseline, ignore any pre-existing traffic
 		c.lastCounters[ctr.Name] = storage.InterfaceCounter{
 			Name:      ctr.Name,
-			BytesSent: curSent,
-			BytesRecv: curRecv,
+			BytesSent: int64(ctr.BytesSent),
+			BytesRecv: int64(ctr.BytesRecv),
 		}
-	}
-
-	if catchupUpload > 0 || catchupDownload > 0 {
-		c.stats.TotalUpload += catchupUpload
-		c.stats.TotalDownload += catchupDownload
-		c.stats.TodayUpload += catchupUpload
-		c.stats.TodayDownload += catchupDownload
 	}
 }
 
 func (c *Collector) loop() {
 	ticker := time.NewTicker(time.Second)
-	persistTicker := time.NewTicker(5 * time.Second)
+	persistTicker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	defer persistTicker.Stop()
 
@@ -178,7 +140,6 @@ func (c *Collector) sample() {
 			dRecv = 0
 		} else if curSent < last.BytesSent || curRecv < last.BytesRecv {
 			// Counter reset (network disconnect/reconnect)
-			// The current value is traffic since reconnection, count it all
 			dSent = curSent
 			dRecv = curRecv
 		} else {
@@ -210,10 +171,25 @@ func (c *Collector) sample() {
 	}
 
 	c.mu.Lock()
+	// Check for day boundary — persist old day and reset Today counters
+	today := time.Now().Format("2006-01-02")
+	if today != c.currentDate {
+		oldDate := c.currentDate
+		oldUp := c.stats.TodayUpload
+		oldDown := c.stats.TodayDownload
+		c.stats.TodayUpload = 0
+		c.stats.TodayDownload = 0
+		c.currentDate = today
+		c.mu.Unlock()
+		// Persist the previous day's final stats
+		if err := c.store.SaveDailyStats(oldDate, oldUp, oldDown); err != nil {
+			log.Printf("save daily (midnight): %v", err)
+		}
+		c.mu.Lock()
+	}
+
 	c.stats.UploadSpeed = uploadDelta
 	c.stats.DownloadSpeed = downloadDelta
-	c.stats.TotalUpload += uploadDelta
-	c.stats.TotalDownload += downloadDelta
 	c.stats.SessionUpload += uploadDelta
 	c.stats.SessionDownload += downloadDelta
 	c.stats.TodayUpload += uploadDelta
@@ -233,9 +209,6 @@ func (c *Collector) persist() {
 	}
 	c.mu.Unlock()
 
-	if err := c.store.SaveTotals(s.TotalUpload, s.TotalDownload); err != nil {
-		log.Printf("save totals: %v", err)
-	}
 	if err := c.store.SaveInterfaceCounters(counters); err != nil {
 		log.Printf("save counters: %v", err)
 	}

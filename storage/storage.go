@@ -14,11 +14,6 @@ type Storage struct {
 	mu sync.Mutex
 }
 
-type TrafficTotals struct {
-	TotalUpload   int64
-	TotalDownload int64
-}
-
 type InterfaceCounter struct {
 	Name      string
 	BytesSent int64
@@ -119,24 +114,6 @@ func (s *Storage) initSchema() error {
 	);
 	`
 	_, err := s.db.Exec(schema)
-	return err
-}
-
-func (s *Storage) LoadTotals() (TrafficTotals, error) {
-	var t TrafficTotals
-	err := s.db.QueryRow(
-		"SELECT total_upload, total_download FROM traffic WHERE id = 1",
-	).Scan(&t.TotalUpload, &t.TotalDownload)
-	return t, err
-}
-
-func (s *Storage) SaveTotals(upload, download int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec(
-		"UPDATE traffic SET total_upload = ?, total_download = ?, updated_at = ? WHERE id = 1",
-		upload, download, time.Now().UTC(),
-	)
 	return err
 }
 
@@ -350,7 +327,7 @@ func (s *Storage) SaveTrafficMinute(minute string, upload, download int64) error
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`
 		INSERT INTO traffic_minute (minute, upload, download) VALUES (?, ?, ?)
-		ON CONFLICT(minute) DO UPDATE SET upload = upload + ?, download = download + ?`,
+		ON CONFLICT(minute) DO UPDATE SET upload = ?, download = ?`,
 		minute, upload, download, upload, download,
 	)
 	return err
@@ -367,7 +344,7 @@ func (s *Storage) SaveKeyStatsMinute(minute string, stats map[string]int64) erro
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO key_stats_minute (minute, key, count) VALUES (?, ?, ?)
-		ON CONFLICT(minute, key) DO UPDATE SET count = count + ?
+		ON CONFLICT(minute, key) DO UPDATE SET count = ?
 	`)
 	if err != nil {
 		return err
@@ -393,7 +370,7 @@ func (s *Storage) SaveMouseStatsMinute(minute string, stats map[string]int64) er
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO mouse_stats_minute (minute, button, count) VALUES (?, ?, ?)
-		ON CONFLICT(minute, button) DO UPDATE SET count = count + ?
+		ON CONFLICT(minute, button) DO UPDATE SET count = ?
 	`)
 	if err != nil {
 		return err
@@ -419,7 +396,7 @@ func (s *Storage) SaveAppUsageMinute(minute string, stats map[string]int64) erro
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO app_usage_minute (minute, app, seconds) VALUES (?, ?, ?)
-		ON CONFLICT(minute, app) DO UPDATE SET seconds = seconds + ?
+		ON CONFLICT(minute, app) DO UPDATE SET seconds = ?
 	`)
 	if err != nil {
 		return err
@@ -435,6 +412,13 @@ func (s *Storage) SaveAppUsageMinute(minute string, stats map[string]int64) erro
 }
 
 // --- Minute-level queries ---
+
+func (s *Storage) QueryDailyTotals() (upload, download int64, err error) {
+	err = s.db.QueryRow(
+		"SELECT COALESCE(SUM(upload),0), COALESCE(SUM(download),0) FROM daily_stats",
+	).Scan(&upload, &download)
+	return
+}
 
 func (s *Storage) QueryTrafficRange(start, end string) (upload, download int64, err error) {
 	err = s.db.QueryRow(
